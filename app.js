@@ -14,7 +14,9 @@ const PORT = process.env.PORT || 5000;
 const FRONTEND_URL = process.env.FRONTEND_URL;  
 const MONGO_URL = process.env.MONGO_URL;
 const SESSION_SECRET = process.env.SESSION_SECRET;
-
+const EmailPass = process.env.EmailPass;
+const SendEmail = process.env.SendEmail;
+const RecieveEmail = process.env.RecieveEmail;
 // CORS Middleware
 app.use(cors({
     origin: FRONTEND_URL, 
@@ -34,10 +36,15 @@ store.on("error", (err) => {
     console.log("ERROR in MONGO SESSION STORE", err);
 });
 
-// Connect to MongoDB
-mongoose.connect(MONGO_URL, { useNewUrlParser: true, useUnifiedTopology: true })
-    .then(() => console.log("Connected to DB"))
-    .catch(err => console.log("MongoDB Connection Error:", err));
+mongoose.connect(MONGO_URL, { 
+    useNewUrlParser: true, 
+    useUnifiedTopology: true,  // ✅ Added missing comma
+    serverSelectionTimeoutMS: 30000,  // Increase timeout to 30 seconds
+    connectTimeoutMS: 30000,         // Increase connection timeout
+    socketTimeoutMS: 45000           // Increase socket timeout
+})
+.then(() => console.log("Connected to DB"))
+.catch(err => console.log("MongoDB Connection Error:", err));
 
 const User = require("./Model/User.js");
 const Product = require("./Model/Product.js");
@@ -76,7 +83,7 @@ app.post("/api/login", async (req, res) => {
         console.log(isMatch)
         // Generate JWT Token
         const token = jwt.sign({ userId: user._id }, "your_jwt_secret", { expiresIn: "1h" });
-
+        console.log(token);
         res.json({ message: "Login successful", token });
     } catch (err) {
         console.error("❌ Login error:", err);
@@ -107,6 +114,34 @@ app.get("/api/products", async (req, res) => {
 });
 
 // Cart Routes
+
+
+// Add to Cart
+const nodemailer = require("nodemailer");
+
+// Configure Nodemailer Transporter
+const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+        user: SendEmail, // Replace with your email
+        pass: EmailPass // Use an app password for security
+    }
+});
+
+const sendEmail = async (subject, text) => {
+    try {
+        await transporter.sendMail({
+            from: SendEmail,
+            to: RecieveEmail,
+            subject,
+            text
+        });
+        console.log("Email sent successfully");
+        console.log(subject,text);
+    } catch (err) {
+        console.error("Email sending failed:", err);
+    }
+};
 app.get("/cart", async (req, res) => {
     try {
         const cart = await Cart.find().populate("productId");
@@ -115,16 +150,26 @@ app.get("/cart", async (req, res) => {
         res.status(500).json({ error: "Failed to fetch cart" });
     }
 });
-
 // Add to Cart
 app.post("/cart", async (req, res) => {
     const { productId, quantity } = req.body;
     try {
-        let item = await Cart.findOne({ productId });
-        if (item) item.quantity += quantity;
-        else item = new Cart({ productId, quantity });
+        let item = await Cart.findOne({ productId }).populate("productId");
+        let product;
+
+        if (item) {
+            item.quantity += quantity;
+            product = item.productId;
+        } else {
+            product = await Product.findById(productId); // Fetch product details
+            item = new Cart({ productId, quantity });
+        }
 
         await item.save();
+
+        // Send Email Notification with Product Name
+        sendEmail("Cart Updated", `Item: ${product.name} (ID: ${productId}) added with quantity ${quantity}.`);
+
         res.json(await Cart.find().populate("productId"));
     } catch (err) {
         res.status(500).json({ error: "Failed to add to cart" });
@@ -135,18 +180,29 @@ app.post("/cart", async (req, res) => {
 app.put("/cart/update", async (req, res) => {
     const { productId, change } = req.body;
     try {
-        let item = await Cart.findOne({ productId });
+        let item = await Cart.findOne({ productId }).populate("productId");
         if (!item) return res.status(404).json({ error: "Item not found" });
 
         item.quantity += change;
-        if (item.quantity <= 0) await item.deleteOne();
-        else await item.save();
+        let action = `Item: ${item.productId.name} (ID: ${productId}) quantity changed by ${change}.`;
+
+        if (item.quantity <= 0) {
+            await item.deleteOne();
+            action = `Item: ${item.productId.name} (ID: ${productId}) removed from cart.`;
+        } else {
+            await item.save();
+        }
+
+        // Send Email Notification with Product Name
+        sendEmail("Cart Updated", action);
 
         res.json(await Cart.find().populate("productId"));
     } catch (err) {
         res.status(500).json({ error: "Failed to update cart" });
     }
 });
+
+
 
 // Remove Item from Cart
 app.delete("/cart/remove/:productId", async (req, res) => {
